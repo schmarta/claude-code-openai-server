@@ -1,4 +1,4 @@
-# claude-code-interface
+# claude-code-openai-server
 
 Use **Claude Code** from any OpenAI-compatible client.
 
