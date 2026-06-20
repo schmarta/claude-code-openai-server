@@ -20,7 +20,7 @@ from app.config import get_settings
 from app.conversation import ConversationManager
 from app.errors import OpenAIError
 from app.mcp_bridge import McpBridge
-from app.routes import chat, health, models
+from app.routes import chat, compat, health, models
 
 logger = logging.getLogger("cci")
 
@@ -67,6 +67,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(models.router)
     app.include_router(chat.router)
+    app.include_router(compat.router)
 
     # Mount the in-process MCP server; the dispatcher reads conv_id from the path.
     app.mount(settings.mcp_path_prefix, mcp.asgi_app())
