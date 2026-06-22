@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
 from collections.abc import AsyncIterator
 
@@ -54,6 +55,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     settings = get_settings()
+
+    # Safety interlock: the server drives the Claude CLI with
+    # permission_mode=bypassPermissions by default, so an open, network-reachable
+    # bind is remote code execution for anyone who can reach it. Refuse to start
+    # on a non-loopback host unless an api_key is set to gate /v1 requests.
+    if not settings.is_loopback_host() and not settings.api_key:
+        raise RuntimeError(
+            f"refusing to start: host={settings.host!r} is not loopback and no "
+            "api_key is set — set CCI_API_KEY to require a bearer token, or bind "
+            "to 127.0.0.1"
+        )
+
     mcp = McpBridge()
 
     app = FastAPI(title="claude-code-interface", lifespan=lifespan)
@@ -63,6 +76,24 @@ def create_app() -> FastAPI:
     @app.exception_handler(OpenAIError)
     async def _openai_error_handler(_: Request, exc: OpenAIError):  # type: ignore[unused-ignore]
         return exc.json_response()
+
+    @app.middleware("http")
+    async def _auth(request: Request, call_next):
+        # When an api_key is configured, every /v1 request must carry a matching
+        # bearer token. The MCP mount is intentionally exempt: it is reached only
+        # by the local Claude subprocess over loopback and carries no token.
+        key = settings.api_key
+        if key and request.url.path.startswith("/v1"):
+            header = request.headers.get("authorization", "")
+            token = header[7:] if header[:7].lower() == "bearer " else ""
+            if not hmac.compare_digest(token, key):
+                return OpenAIError(
+                    "missing or invalid api key",
+                    status_code=401,
+                    type="invalid_request_error",
+                    code="invalid_api_key",
+                ).json_response()
+        return await call_next(request)
 
     app.include_router(health.router)
     app.include_router(models.router)

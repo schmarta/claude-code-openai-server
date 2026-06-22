@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8787
 
+    # ── Auth ─────────────────────────────────────────────────────────────────
+    # Optional bearer token. When set, every /v1 request must carry
+    # `Authorization: Bearer <api_key>`. Left unset, the server is open — which
+    # is only safe on a loopback bind (see the startup guard in main.create_app).
+    api_key: str | None = None
+
     # ── Claude CLI ───────────────────────────────────────────────────────────
     claude_bin: str = "claude"
     default_model: str = "claude-opus-4-8"
@@ -75,6 +81,11 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return Path(v).expanduser()
         return v
+
+    def is_loopback_host(self) -> bool:
+        """True when the bind host only accepts connections from this machine."""
+        h = self.host.strip().lower()
+        return h in {"localhost", "::1", "0:0:0:0:0:0:0:1"} or h.startswith("127.")
 
     def resolved_workdir_roots(self) -> list[Path]:
         """The set of allowed workspace roots as resolved absolute paths."""
