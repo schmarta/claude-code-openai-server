@@ -85,3 +85,101 @@ def test_multiple_tool_boundaries():
 def test_empty_feeds_ignored():
     j = SegmentJoiner()
     assert _run(j, [("text", ""), ("text", "x"), ("text", "")]) == "x"
+
+
+# ── table flattening ─────────────────────────────────────────────────────────
+
+from app.textfilter import OutputFilter, TableFlattener  # noqa: E402
+
+
+def _content_lines(fenced: str) -> list[str]:
+    """The lines of a single fenced block, fence markers stripped."""
+    body = fenced.strip()
+    assert body.startswith("```") and body.endswith("```")
+    return body.splitlines()[1:-1]
+
+
+def test_simple_table_becomes_fenced_ascii():
+    src = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |\n"
+    out = TableFlattener().feed(src) + TableFlattener().flush()
+    f = TableFlattener()
+    out = f.feed(src) + f.flush()
+    assert out.startswith("```\n") and out.rstrip().endswith("```")
+    # original GFM separator pipes are gone
+    assert "|------|" not in out
+    # a column-junction separator row exists
+    assert "-+-" in out
+    lines = _content_lines(out)
+    # header + separator + 2 body rows
+    assert len(lines) == 4
+    assert "Name" in lines[0] and "Age" in lines[0]
+    assert "Alice" in lines[2] and "Bob" in lines[3]
+    # columns align: the " | " separators sit at the same offset in every data row
+    data = [lines[0], lines[2], lines[3]]
+    offsets = {ln.index(" | ") for ln in data}
+    assert len(offsets) == 1
+
+
+def test_right_alignment_from_separator():
+    src = "| x | n |\n|:--|--:|\n| a | 5 |\n"
+    f = TableFlattener()
+    out = f.feed(src) + f.flush()
+    lines = _content_lines(out)
+    # right-aligned numeric column: '5' pushed to the right of its cell
+    assert lines[2].rstrip().endswith("5")
+
+
+def test_non_table_pipe_line_passes_through():
+    # A lone pipe line with no separator row is not a table — leave it alone.
+    src = "use a | b | c shell pipe here\n"
+    f = TableFlattener()
+    out = f.feed(src) + f.flush()
+    assert out == src
+    assert "```" not in out
+
+
+def test_pipes_inside_code_fence_not_touched():
+    src = "```\n| not | a table |\n|-----|---------|\n```\n"
+    f = TableFlattener()
+    out = f.feed(src) + f.flush()
+    assert out == src
+
+
+def test_prose_passes_through_unchanged():
+    src = "Just a normal paragraph.\nSecond line, no pipes.\n"
+    f = TableFlattener()
+    assert f.feed(src) + f.flush() == src
+
+
+def test_table_split_across_streamed_chunks():
+    src = "| A | B |\n|---|---|\n| 1 | 2 |\n"
+    whole = TableFlattener()
+    expected = whole.feed(src) + whole.flush()
+    piece = TableFlattener()
+    got = "".join(piece.feed(ch) for ch in src) + piece.flush()
+    assert got == expected
+    assert got.startswith("```")
+
+
+def test_table_with_no_trailing_newline_flushes():
+    src = "| A | B |\n|---|---|\n| 1 | 2 |"  # no final newline
+    f = TableFlattener()
+    out = f.feed(src) + f.flush()
+    assert out.startswith("```") and "1" in out and "2" in out
+
+
+def test_outputfilter_combines_seam_and_table():
+    flt = OutputFilter(flatten_tables=True)
+    out = flt.feed("Here is the data.")
+    flt.tool_boundary()
+    out += flt.feed("| A | B |\n|---|---|\n| 1 | 2 |\n")
+    out += flt.flush()
+    assert out.startswith("Here is the data.\n\n")
+    assert "```" in out and "-+-" in out
+
+
+def test_outputfilter_disabled_leaves_tables_raw():
+    flt = OutputFilter(flatten_tables=False)
+    src = "| A | B |\n|---|---|\n| 1 | 2 |\n"
+    out = flt.feed(src) + flt.flush()
+    assert out == src

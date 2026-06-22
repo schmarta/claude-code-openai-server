@@ -29,7 +29,7 @@ from app.conversation import (
 from app.errors import OpenAIError, error_envelope
 from app.events import AssistantToolUse, Error, TextDelta, TurnDone
 from app.openai_models import ChatCompletionRequest
-from app.textfilter import SegmentJoiner
+from app.textfilter import OutputFilter
 from app.translate import (
     DONE,
     completion_response,
@@ -94,22 +94,24 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     created = now()
     timeout = settings.request_timeout_s
 
+    flatten = settings.flatten_markdown_tables
     if req.stream:
         return StreamingResponse(
-            _stream(sess, cid, model, created, timeout),
+            _stream(sess, cid, model, created, timeout, flatten),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
         )
-    body = await _collect(sess, cid, model, created, timeout)
+    body = await _collect(sess, cid, model, created, timeout, flatten)
     return JSONResponse(content=body)
 
 
 async def _stream(
-    sess: ClaudeSession, cid: str, model: str, created: int, timeout: float
+    sess: ClaudeSession, cid: str, model: str, created: int, timeout: float,
+    flatten_tables: bool = True,
 ) -> AsyncIterator[str]:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    joiner = SegmentJoiner()
+    joiner = OutputFilter(flatten_tables=flatten_tables)
     try:
         yield sse(role_chunk(cid, model, created))
         while True:
@@ -160,11 +162,12 @@ async def _stream(
 
 
 async def _collect(
-    sess: ClaudeSession, cid: str, model: str, created: int, timeout: float
+    sess: ClaudeSession, cid: str, model: str, created: int, timeout: float,
+    flatten_tables: bool = True,
 ) -> dict:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    joiner = SegmentJoiner()
+    joiner = OutputFilter(flatten_tables=flatten_tables)
     chunks: list[str] = []
     try:
         while True:

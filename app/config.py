@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     # tool-search indirection, so hermes' functions are always visible.
     enable_tool_search: bool = False
 
+    # ── Output formatting ──────────────────────────────────────────────────—
+    # Rewrite Markdown pipe tables to fenced monospace ASCII so they render in
+    # clients (e.g. Discord) that don't support Markdown tables.
+    flatten_markdown_tables: bool = True
+
     # ── Workspace ──────────────────────────────────────────────────────────—
     default_workdir: Path = Path("~/cci-workspace").expanduser()
     # Per-request `workdir` overrides must resolve under one of these roots.
