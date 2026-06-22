@@ -29,6 +29,7 @@ from app.conversation import (
 from app.errors import OpenAIError, error_envelope
 from app.events import AssistantToolUse, Error, TextDelta, TurnDone
 from app.openai_models import ChatCompletionRequest
+from app.textfilter import SegmentJoiner
 from app.translate import (
     DONE,
     completion_response,
@@ -108,6 +109,7 @@ async def _stream(
 ) -> AsyncIterator[str]:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
+    joiner = SegmentJoiner()
     try:
         yield sse(role_chunk(cid, model, created))
         while True:
@@ -120,11 +122,19 @@ async def _stream(
                 yield sse(error_envelope("upstream timeout", type="timeout_error"))
                 break
             if ev is STREAM_CLOSED:
+                tail = joiner.flush()
+                if tail:
+                    yield sse(text_chunk(cid, model, created, tail))
                 yield sse(finish_chunk(cid, model, created, "stop"))
                 break
             if isinstance(ev, TextDelta):
-                yield sse(text_chunk(cid, model, created, ev.text))
+                out = joiner.feed(ev.text)
+                if out:
+                    yield sse(text_chunk(cid, model, created, out))
             elif isinstance(ev, TurnDone):
+                tail = joiner.flush()
+                if tail:
+                    yield sse(text_chunk(cid, model, created, tail))
                 yield sse(
                     finish_chunk(
                         cid, model, created,
@@ -137,8 +147,11 @@ async def _stream(
                 yield sse(error_envelope(ev.message, type="upstream_error"))
                 break
             elif isinstance(ev, AssistantToolUse):
-                # Built-in tool use runs internally; nothing to surface here.
+                # Built-in tool use runs internally; nothing to surface, but it
+                # marks the seam between two assistant text segments so the next
+                # one starts on a fresh blank line instead of gluing on.
                 logger.debug("internal tool use: %s", [b.name for b in ev.tool_uses])
+                joiner.tool_boundary()
                 continue
             # Init / others: ignore.
         yield DONE
@@ -151,6 +164,7 @@ async def _collect(
 ) -> dict:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
+    joiner = SegmentJoiner()
     chunks: list[str] = []
     try:
         while True:
@@ -161,13 +175,19 @@ async def _collect(
             if ev is None:
                 raise OpenAIError("upstream timeout", status_code=504, type="timeout_error")
             if ev is STREAM_CLOSED:
+                chunks.append(joiner.flush())
                 return completion_response(
                     cid, model, created, content="".join(chunks), finish_reason="stop"
                 )
             if isinstance(ev, TextDelta):
-                chunks.append(ev.text)
+                chunks.append(joiner.feed(ev.text))
             elif isinstance(ev, TurnDone):
-                text = ev.result_text if ev.result_text is not None else "".join(chunks)
+                chunks.append(joiner.flush())
+                # Prefer the segment-joined text (it carries every text block plus
+                # the seams that `result` flattens away); fall back to `result`
+                # only when no deltas were captured.
+                assembled = "".join(chunks)
+                text = assembled if assembled.strip() else (ev.result_text or "")
                 return completion_response(
                     cid, model, created,
                     content=text,
@@ -178,6 +198,7 @@ async def _collect(
                 raise OpenAIError(ev.message, status_code=502, type="upstream_error")
             elif isinstance(ev, AssistantToolUse):
                 logger.debug("internal tool use: %s", [b.name for b in ev.tool_uses])
+                joiner.tool_boundary()
                 continue
     finally:
         await sess.aclose()

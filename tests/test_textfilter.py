@@ -1,0 +1,87 @@
+"""Unit tests for app.textfilter."""
+
+from app.textfilter import SegmentJoiner
+
+
+def _run(joiner: SegmentJoiner, ops) -> str:
+    """Replay a script of ("text", str) / ("tool",) ops; return joined output."""
+    out = []
+    for op in ops:
+        if op[0] == "text":
+            out.append(joiner.feed(op[1]))
+        else:
+            joiner.tool_boundary()
+    out.append(joiner.flush())
+    return "".join(out)
+
+
+def test_glues_segments_get_blank_line():
+    # The exact reported failure: "runs." then a tool, then "Found it".
+    j = SegmentJoiner()
+    result = _run(j, [
+        ("text", "...one-off CLI runs."),
+        ("tool",),
+        ("text", "Found it — SOUL.md is the persona file."),
+    ])
+    assert result == "...one-off CLI runs.\n\nFound it — SOUL.md is the persona file."
+
+
+def test_no_boundary_passes_through_unchanged():
+    j = SegmentJoiner()
+    assert _run(j, [("text", "hello "), ("text", "world")]) == "hello world"
+
+
+def test_newline_within_block_preserved():
+    j = SegmentJoiner()
+    assert _run(j, [("text", "line1\nline2\nline3")]) == "line1\nline2\nline3"
+
+
+def test_prev_segment_ending_in_one_newline():
+    j = SegmentJoiner()
+    # prev leaves one "\n"; seam adds one more → exactly one blank line.
+    assert _run(j, [("text", "a\n"), ("tool",), ("text", "b")]) == "a\n\nb"
+
+
+def test_prev_segment_ending_in_blank_line_no_extra():
+    j = SegmentJoiner()
+    assert _run(j, [("text", "a\n\n"), ("tool",), ("text", "b")]) == "a\n\nb"
+
+
+def test_next_segment_leading_newline_not_doubled():
+    j = SegmentJoiner()
+    assert _run(j, [("text", "a"), ("tool",), ("text", "\nb")]) == "a\n\nb"
+
+
+def test_next_segment_leading_blank_line_not_tripled():
+    j = SegmentJoiner()
+    assert _run(j, [("text", "a"), ("tool",), ("text", "\n\nb")]) == "a\n\nb"
+
+
+def test_leading_tool_before_any_text_no_separator():
+    j = SegmentJoiner()
+    # A tool that runs before any assistant text must not produce a leading break.
+    assert _run(j, [("tool",), ("text", "first words")]) == "first words"
+
+
+def test_separator_spans_split_deltas():
+    # The boundary's separator must land even when emit resumes across deltas.
+    j = SegmentJoiner()
+    assert _run(j, [("text", "end."), ("tool",), ("text", "next"), ("text", " more")]) == \
+        "end.\n\nnext more"
+
+
+def test_multiple_tool_boundaries():
+    j = SegmentJoiner()
+    result = _run(j, [
+        ("text", "a"),
+        ("tool",),
+        ("text", "b"),
+        ("tool",),
+        ("text", "c"),
+    ])
+    assert result == "a\n\nb\n\nc"
+
+
+def test_empty_feeds_ignored():
+    j = SegmentJoiner()
+    assert _run(j, [("text", ""), ("text", "x"), ("text", "")]) == "x"
