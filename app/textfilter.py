@@ -201,8 +201,15 @@ class TableFlattener:
     def flush(self) -> str:
         out: list[str] = []
         if self._decided is True:
-            self._table.append(self._line)
-            out.append(self._flush_table())
+            rows = self._table + [self._line]
+            self._table = []
+            if _looks_like_table(rows):
+                out.append(render_ascii_table(rows))
+            else:
+                # Non-table candidate flushed at EOF: the buffered rows each had
+                # a source newline but the trailing partial line did not, so join
+                # with newlines WITHOUT appending a phantom one at the end.
+                out.append("\n".join(rows))
         elif self._decided is None:
             out.append(self._flush_table())
             out.append(self._line)

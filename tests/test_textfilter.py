@@ -138,6 +138,25 @@ def test_non_table_pipe_line_passes_through():
     assert "```" not in out
 
 
+def test_non_table_candidate_at_eof_no_phantom_newline():
+    # A line that opens like a table cell ("|") but never gets a separator row,
+    # streamed WITHOUT a trailing newline, must come out verbatim. flush() must
+    # not append a phantom "\n" to the final partial line.
+    src = "| lonely pipe, no newline"
+    f = TableFlattener()
+    assert f.feed(src) + f.flush() == src
+    of = OutputFilter()
+    assert of.feed(src) + of.flush() == src
+
+
+def test_multiline_non_table_candidate_at_eof_preserves_newlines():
+    # Several pipe-leading lines that are not a table: internal newlines kept,
+    # but no trailing one invented on the unterminated last line.
+    src = "| row one\n| row two no newline"
+    f = TableFlattener()
+    assert f.feed(src) + f.flush() == src
+
+
 def test_pipes_inside_code_fence_not_touched():
     src = "```\n| not | a table |\n|-----|---------|\n```\n"
     f = TableFlattener()
