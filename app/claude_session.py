@@ -146,12 +146,17 @@ class ClaudeSession:
             while True:
                 try:
                     raw = await stdout.readline()
-                except asyncio.LimitOverrunError:
-                    # A line longer than the buffer cap: drain to the next
-                    # newline and skip it rather than crash the reader.
-                    await self._drain_oversized_line(stdout)
+                except ValueError:
+                    # A line longer than the buffer cap. asyncio's readline()
+                    # catches the underlying LimitOverrunError and re-raises it
+                    # as ValueError, having already cleared/advanced its buffer
+                    # past the offending data — so we skip this one line and
+                    # keep reading instead of killing the whole stream.
+                    logger.warning(
+                        "skipped oversized stdout line (> %d bytes)", _READ_LIMIT
+                    )
                     continue
-                except (asyncio.IncompleteReadError, ValueError):
+                except asyncio.IncompleteReadError:
                     break
                 if not raw:
                     break
@@ -165,19 +170,6 @@ class ClaudeSession:
                     await self._queue.put(ev)
         finally:
             await self._queue.put(STREAM_CLOSED)
-
-    @staticmethod
-    async def _drain_oversized_line(stdout: asyncio.StreamReader) -> None:
-        while True:
-            try:
-                chunk = await stdout.readuntil(b"\n")
-                if chunk.endswith(b"\n"):
-                    return
-            except asyncio.LimitOverrunError:
-                # Still no newline within the cap — keep discarding.
-                await stdout.read(_READ_LIMIT)
-            except (asyncio.IncompleteReadError, ValueError):
-                return
 
     async def _read_stderr(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None
