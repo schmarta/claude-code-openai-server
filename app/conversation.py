@@ -187,25 +187,44 @@ class ConversationManager:
             raise ExpiredContinuation("no trailing tool results in continuation request")
         ids = [m.tool_call_id for m in tool_msgs if m.tool_call_id]
 
+        # Locate AND claim the conversation atomically: verify it is suspended
+        # and flip it to RUNNING under one lock acquisition. A second concurrent
+        # continuation for the same conv then sees RUNNING and is rejected,
+        # instead of both passing the check and double-driving the one Claude
+        # subprocess (the TOCTOU race). The claimed ids leave the global index
+        # while we still hold the lock.
         async with self._lock:
             conv_id = next((self._pending_index[i] for i in ids if i in self._pending_index), None)
             conv = self._conversations.get(conv_id) if conv_id else None
+            if conv is None or conv.state != SUSPENDED:
+                raise ExpiredContinuation(
+                    "tool results reference an expired or unknown conversation; retry the turn"
+                )
+            conv.state = RUNNING
+            conv.touch()
+            for tid in ids:
+                self._pending_index.pop(tid, None)
 
-        if conv is None or conv.state != SUSPENDED:
-            raise ExpiredContinuation(
-                "tool results reference an expired or unknown conversation; retry the turn"
-            )
-
+        # Deliver results to the per-call Futures (outside the lock).
+        outstanding = set(conv.bridge.pending_ids)
+        answered: set[str] = set()
         resolved = 0
         for m in tool_msgs:
             if not m.tool_call_id:
                 continue
+            answered.add(m.tool_call_id)
             if conv.bridge.resolve(m.tool_call_id, message_text(m)):
                 resolved += 1
-            async with self._lock:
-                self._pending_index.pop(m.tool_call_id, None)
-        conv.state = RUNNING
-        conv.touch()
+
+        # Any call Claude is still blocked on that this continuation did not
+        # answer would hang the subprocess until the request timeout. Fail those
+        # Futures so the turn errors out promptly instead of stalling.
+        missing = outstanding - answered
+        if missing:
+            logger.warning("conv=%s partial continuation: %d of %d tool calls unanswered",
+                           conv.conv_id, len(missing), len(outstanding))
+            conv.bridge.fail_all("continuation did not supply all tool results")
+
         logger.info("conv=%s resumed (%d/%d tool results)", conv.conv_id, resolved, len(tool_msgs))
         return conv
 

@@ -23,7 +23,7 @@ from app.conversation import (
 )
 from app.claude_session import STREAM_CLOSED
 from app.events import Error, TextDelta, TurnDone
-from app.mcp_bridge import ConversationBridge, McpBridge
+from app.mcp_bridge import ConversationBridge, McpBridge, ToolResultError
 from app.openai_models import (
     ChatCompletionRequest,
     ChatMessage,
@@ -255,6 +255,80 @@ async def test_resume_expired_raises():
         ChatMessage(role="tool", tool_call_id="call_unknown", content="x")])
     with pytest.raises(ExpiredContinuation):
         await mgr.resume(cont)
+
+
+async def _park_pending(bridge, n):
+    """Spawn n dispatch() coroutines and wait until all register as pending."""
+    tasks = [asyncio.create_task(bridge.dispatch("get_weather", {"i": i})) for i in range(n)]
+    for _ in range(50):
+        if len(bridge.pending_ids) == n:
+            break
+        await asyncio.sleep(0)
+    assert len(bridge.pending_ids) == n
+    return tasks
+
+
+async def test_concurrent_resume_only_one_wins():
+    """Two continuations racing for the same suspended conv: exactly one claims
+    and drives it, the other is rejected — never double-drive the one subprocess."""
+    mcp = McpBridge()
+    mgr = ConversationManager(mcp, make_settings())
+    bridge = ConversationBridge("c1", weather_tools())
+    mcp.register(bridge)
+    conv = Conversation(conv_id="c1", session=FakeSession([]), bridge=bridge,
+                        model="sonnet", state=SUSPENDED)
+    mgr._conversations["c1"] = conv
+
+    (task,) = await _park_pending(bridge, 1)
+    call_id = bridge.pending_ids[0]
+    mgr._pending_index[call_id] = "c1"
+
+    cont = ChatCompletionRequest(
+        tools=weather_tools(),
+        messages=[ChatMessage(role="tool", tool_call_id=call_id, content='{"temp_c":21}')],
+    )
+    results = await asyncio.gather(mgr.resume(cont), mgr.resume(cont),
+                                   return_exceptions=True)
+    wins = [r for r in results if isinstance(r, Conversation)]
+    rejects = [r for r in results if isinstance(r, ExpiredContinuation)]
+    assert len(wins) == 1 and len(rejects) == 1
+    assert conv.state == RUNNING
+    assert await asyncio.wait_for(task, 1) == '{"temp_c":21}'
+    assert call_id not in mgr._pending_index
+
+
+async def test_partial_continuation_fails_unanswered_calls():
+    """A continuation answering only some outstanding calls must fail the rest so
+    the subprocess unblocks immediately instead of hanging to the timeout."""
+    mcp = McpBridge()
+    mgr = ConversationManager(mcp, make_settings())
+    bridge = ConversationBridge("c1", weather_tools())
+    mcp.register(bridge)
+    conv = Conversation(conv_id="c1", session=FakeSession([]), bridge=bridge,
+                        model="sonnet", state=SUSPENDED)
+    mgr._conversations["c1"] = conv
+
+    t1, t2 = await _park_pending(bridge, 2)
+    ids = list(bridge.pending_ids)
+    for i in ids:
+        mgr._pending_index[i] = "c1"
+
+    # Continuation answers only the first call.
+    cont = ChatCompletionRequest(
+        tools=weather_tools(),
+        messages=[ChatMessage(role="tool", tool_call_id=ids[0], content='{"temp_c":21}')],
+    )
+    await mgr.resume(cont)
+
+    answered, hung = (t1, t2) if bridge_call_index(ids, 0) else (t2, t1)
+    assert await asyncio.wait_for(answered, 1) == '{"temp_c":21}'
+    with pytest.raises(ToolResultError):
+        await asyncio.wait_for(hung, 1)
+
+
+def bridge_call_index(ids, which):
+    """ids[0] corresponds to the first-dispatched task (insertion order)."""
+    return which == 0
 
 
 # ── GC ───────────────────────────────────────────────────————————————————————
