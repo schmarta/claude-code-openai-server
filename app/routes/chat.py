@@ -24,6 +24,7 @@ from app.conversation import (
     ErrorChunk,
     ExpiredContinuation,
     TextChunk,
+    ToolBoundaryChunk,
     ToolCallsChunk,
 )
 from app.errors import OpenAIError, error_envelope
@@ -230,23 +231,34 @@ async def _handle_tools(
 
     cid = new_completion_id()
     created = now()
+    flatten = get_settings().flatten_markdown_tables
 
     if req.stream:
         return StreamingResponse(
-            _tool_stream(mgr, conv, cid, model, created),
+            _tool_stream(mgr, conv, cid, model, created, flatten),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
         )
-    body = await _tool_collect(mgr, conv, cid, model, created)
+    body = await _tool_collect(mgr, conv, cid, model, created, flatten)
     return JSONResponse(content=body)
 
 
-async def _tool_stream(mgr, conv, cid, model, created):
+async def _tool_stream(mgr, conv, cid, model, created, flatten_tables: bool = True):
+    # Same OutputFilter the autonomous path uses, so the newline-seam and table
+    # flattening apply on the tool path too.
+    filt = OutputFilter(flatten_tables=flatten_tables)
     yield sse(role_chunk(cid, model, created))
     async for ch in mgr.run_turn(conv):
         if isinstance(ch, TextChunk):
-            yield sse(text_chunk(cid, model, created, ch.text))
+            out = filt.feed(ch.text)
+            if out:
+                yield sse(text_chunk(cid, model, created, out))
+        elif isinstance(ch, ToolBoundaryChunk):
+            filt.tool_boundary()
         elif isinstance(ch, ToolCallsChunk):
+            tail = filt.flush()
+            if tail:
+                yield sse(text_chunk(cid, model, created, tail))
             calls = [
                 {**pc.openai_tool_call(), "index": i} for i, pc in enumerate(ch.calls)
             ]
@@ -254,6 +266,9 @@ async def _tool_stream(mgr, conv, cid, model, created):
             yield sse(finish_chunk(cid, model, created, "tool_calls"))
             break
         elif isinstance(ch, DoneChunk):
+            tail = filt.flush()
+            if tail:
+                yield sse(text_chunk(cid, model, created, tail))
             yield sse(finish_chunk(cid, model, created, ch.finish_reason, ch.usage or None))
             break
         elif isinstance(ch, ErrorChunk):
@@ -262,12 +277,16 @@ async def _tool_stream(mgr, conv, cid, model, created):
     yield DONE
 
 
-async def _tool_collect(mgr, conv, cid, model, created) -> dict:
+async def _tool_collect(mgr, conv, cid, model, created, flatten_tables: bool = True) -> dict:
+    filt = OutputFilter(flatten_tables=flatten_tables)
     text_parts: list[str] = []
     async for ch in mgr.run_turn(conv):
         if isinstance(ch, TextChunk):
-            text_parts.append(ch.text)
+            text_parts.append(filt.feed(ch.text))
+        elif isinstance(ch, ToolBoundaryChunk):
+            filt.tool_boundary()
         elif isinstance(ch, ToolCallsChunk):
+            text_parts.append(filt.flush())
             return completion_response(
                 cid, model, created,
                 content="".join(text_parts) or None,
@@ -275,6 +294,7 @@ async def _tool_collect(mgr, conv, cid, model, created) -> dict:
                 tool_calls=[pc.openai_tool_call() for pc in ch.calls],
             )
         elif isinstance(ch, DoneChunk):
+            text_parts.append(filt.flush())
             return completion_response(
                 cid, model, created,
                 content="".join(text_parts),

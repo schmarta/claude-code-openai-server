@@ -70,7 +70,14 @@ class ErrorChunk:
     status_code: int = 502
 
 
-TurnChunk = Union[TextChunk, ToolCallsChunk, DoneChunk, ErrorChunk]
+@dataclass
+class ToolBoundaryChunk:
+    """Marks an internal (built-in) tool use between two assistant text
+    segments. Carries no text; the route uses it to insert a blank-line seam so
+    the next text block does not glue onto the previous one."""
+
+
+TurnChunk = Union[TextChunk, ToolCallsChunk, DoneChunk, ErrorChunk, ToolBoundaryChunk]
 
 
 # ── conversation ────────────────────────────────────────────────────────────
@@ -224,6 +231,10 @@ class ConversationManager:
                     if not hermes:
                         logger.debug("conv=%s internal tools: %s", conv.conv_id,
                                      [b.name for b in ev.builtin_calls])
+                        # Built-in tool ran internally; surface a seam marker so
+                        # the route's OutputFilter starts the next text segment
+                        # on a fresh blank line instead of gluing it on.
+                        yield ToolBoundaryChunk()
                         continue
                     batch = await conv.bridge.collect_batch(len(hermes))
                     if not batch:
