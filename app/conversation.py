@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
-from app.claude_session import STREAM_CLOSED, ClaudeSession
+from app.claude_session import STREAM_CLOSED, ClaudeSession, prompt_session_kwargs as _prompt_kwargs
 from app.config import Settings
 from app.events import AssistantToolUse, Error, TextDelta, TurnDone
 from app.mcp_bridge import ConversationBridge, McpBridge, PendingCall
@@ -168,8 +168,8 @@ class ConversationManager:
             workdir=workdir,
             effort=effort,
             mcp_config=mcp_config,
-            append_system_prompt=system,
             enable_tool_search=self.settings.enable_tool_search,
+            **_prompt_kwargs(self.settings, system),
         )
         await session.start()
         conv = Conversation(conv_id=conv_id, session=session, bridge=bridge, model=model)

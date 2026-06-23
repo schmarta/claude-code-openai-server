@@ -41,6 +41,23 @@ STREAM_CLOSED = object()
 _READ_LIMIT = 64 * 1024 * 1024
 
 
+def prompt_session_kwargs(settings: Any, system_prompt: Optional[str]) -> dict[str, Any]:
+    """System-prompt / built-in-tool kwargs for :class:`ClaudeSession`.
+
+    In *bare model* mode the request's ``system_prompt`` REPLACES claude's
+    default prompt, the dynamic context sections are excluded, and every native
+    tool is stripped (only ``--mcp-config`` tools remain). Otherwise the prompt
+    is appended and claude keeps its full default tool set.
+    """
+    if getattr(settings, "bare_model_mode", False):
+        return {
+            "system_prompt": system_prompt or settings.bare_model_system_prompt,
+            "exclude_dynamic_sections": True,
+            "builtin_tools": [],
+        }
+    return {"append_system_prompt": system_prompt}
+
+
 class ClaudeSession:
     """Drives one persistent ``claude`` subprocess over stream-json."""
 
@@ -55,6 +72,9 @@ class ClaudeSession:
         mcp_config: Optional[dict[str, Any]] = None,
         allowed_tools: Optional[list[str]] = None,
         append_system_prompt: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        exclude_dynamic_sections: bool = False,
+        builtin_tools: Optional[list[str]] = None,
         enable_tool_search: bool = False,
         env: Optional[dict[str, str]] = None,
     ) -> None:
@@ -66,6 +86,14 @@ class ClaudeSession:
         self.mcp_config = mcp_config
         self.allowed_tools = allowed_tools
         self.append_system_prompt = append_system_prompt
+        # When set, REPLACES claude's default (Claude Code) system prompt via
+        # --system-prompt, instead of layering on top via --append-system-prompt.
+        self.system_prompt = system_prompt
+        # Drop the dynamic context blocks (env, cwd, git status, identity).
+        self.exclude_dynamic_sections = exclude_dynamic_sections
+        # Built-in tool allowlist for --tools. [] disables ALL native tools
+        # (only --mcp-config tools remain); None leaves claude's defaults.
+        self.builtin_tools = builtin_tools
         self.enable_tool_search = enable_tool_search
         self._env_overrides = env or {}
 
@@ -96,8 +124,18 @@ class ClaudeSession:
             args += ["--mcp-config", json.dumps(self.mcp_config), "--strict-mcp-config"]
         if self.allowed_tools:
             args += ["--allowed-tools", ",".join(self.allowed_tools)]
-        if self.append_system_prompt:
+        # System prompt: --system-prompt fully replaces the default; otherwise
+        # --append-system-prompt layers onto Claude Code's built-in prompt.
+        if self.system_prompt is not None:
+            args += ["--system-prompt", self.system_prompt]
+        elif self.append_system_prompt:
             args += ["--append-system-prompt", self.append_system_prompt]
+        if self.exclude_dynamic_sections:
+            args += ["--exclude-dynamic-system-prompt-sections"]
+        # Built-in tool selection. [] => "--tools ''" (none); a non-empty list
+        # is passed as space-separated tokens (the CLI's variadic format).
+        if self.builtin_tools is not None:
+            args += ["--tools", *(self.builtin_tools or [""])]
         return args
 
     def _build_env(self) -> dict[str, str]:

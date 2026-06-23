@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.claude_session import STREAM_CLOSED, ClaudeSession
+from app.claude_session import STREAM_CLOSED, ClaudeSession, prompt_session_kwargs as _prompt_kwargs
 from app.config import ensure_workdir, get_settings, resolve_model
 from app.conversation import (
     ConversationManager,
@@ -85,8 +85,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         permission_mode=settings.permission_mode,
         workdir=workdir,
         effort=effort,
-        append_system_prompt=system,
         enable_tool_search=settings.enable_tool_search,
+        **_prompt_kwargs(settings, system),
     )
     await sess.start()
     await sess.send_user_turn(content)

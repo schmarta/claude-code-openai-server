@@ -52,6 +52,21 @@ class Settings(BaseSettings):
     # tool-search indirection, so hermes' functions are always visible.
     enable_tool_search: bool = False
 
+    # ── "Bare model" mode ──────────────────────────────────────────────────—
+    # When true, the spawned claude is stripped of its Claude Code identity and
+    # native tooling so it behaves as a plain model fronted by hermes:
+    #   * the request's system message REPLACES claude's default system prompt
+    #     (--system-prompt) instead of being appended,
+    #   * --exclude-dynamic-system-prompt-sections drops the env/git/identity
+    #     context blocks the CLI normally injects,
+    #   * --tools "" removes every built-in tool, leaving only the hermes MCP
+    #     tools delivered via --mcp-config.
+    # Set CCI_BARE_MODEL_MODE=false to restore the legacy append+full-tools behavior.
+    bare_model_mode: bool = True
+    # Fallback system prompt used only in bare mode when a request carries no
+    # system message of its own (hermes normally always sends one).
+    bare_model_system_prompt: str = "You are a helpful AI assistant."
+
     # ── Output formatting ──────────────────────────────────────────────────—
     # Rewrite Markdown pipe tables to fenced monospace ASCII so they render in
     # clients (e.g. Discord) that don't support Markdown tables.
