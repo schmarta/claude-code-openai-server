@@ -109,7 +109,15 @@ app = create_app()
 
 
 def run() -> None:
-    """Console-script entrypoint (``claude-code-interface``)."""
+    """Console-script entrypoint (``claude-code-interface``).
+
+    Requests uvloop + httptools explicitly. uvicorn's default ``loop="auto"``
+    already picks uvloop when installed, but naming them makes the fast path
+    deterministic regardless of what is importable at boot. NOTE: the systemd
+    unit launches ``python -m uvicorn`` directly (not this entrypoint), so to
+    pin the fast loop in production either switch ExecStart to the
+    ``claude-code-interface`` script or add ``--loop uvloop --http httptools``.
+    """
     import uvicorn
 
     settings = get_settings()
@@ -118,6 +126,8 @@ def run() -> None:
         host=settings.host,
         port=settings.port,
         log_level=settings.log_level.lower(),
+        loop="uvloop",
+        http="httptools",
     )
 
 
