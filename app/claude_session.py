@@ -117,6 +117,11 @@ class ClaudeSession:
             self.claude_bin,
             "--input-format", "stream-json",
             "--output-format", "stream-json",
+            # --verbose is MANDATORY under --output-format stream-json, NOT
+            # optional log noise. Empirically (CLI 2.1.185) dropping it makes the
+            # CLI exit 1 with "When using --print, --output-format=stream-json
+            # requires --verbose" — zero stream-json lines, no partial deltas.
+            # See Phase 1.2 in the latency plan. Do not remove.
             "--verbose",
             "--include-partial-messages",
             "--permission-prompt-tool", "stdio",
