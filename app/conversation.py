@@ -169,6 +169,8 @@ class ConversationManager:
             effort=effort,
             mcp_config=mcp_config,
             enable_tool_search=self.settings.enable_tool_search,
+            timing_log=self.settings.timing_log,
+            timing_label="tool",
             **_prompt_kwargs(self.settings, system),
         )
         await session.start()
