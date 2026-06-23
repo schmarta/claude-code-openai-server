@@ -131,6 +131,21 @@ Anthropic prompt caching can make a fixed system-prompt prefix near-free on repe
 - If it caches: a warm pool + stable prompt already reaps it. If not and there's a flag, enable it.
 - **Verify:** compare TTFT of 2nd identical-prefix request vs 1st; a cache hit shows a step-down in input processing time / `cache_read` tokens in usage.
 
+### Phase 4 findings (2026-06-23, CLI 2.1.185, model claude-opus-4-8)
+
+**Verdict: the CLI sets prompt-cache breakpoints automatically. No flag exists or is needed. Already optimal.**
+
+Empirical test (`/tmp/probe_cache.py`): two SEPARATE bare-mode `claude` procs (mirroring the server's per-turn fresh-process model) spawned ~2s apart with an identical ~4.6k-token system prompt + identical user turn. Raw `result` usage:
+
+- **Run 1 (cold):** `cache_creation_input_tokens: 4586`, `cache_read_input_tokens: 0`, and `cache_creation: { ephemeral_1h_input_tokens: 4586, ephemeral_5m_input_tokens: 0 }`.
+- **Run 2 (warm, separate process):** `cache_creation_input_tokens: 0`, `cache_read_input_tokens: 4586` — a **full cache hit**.
+
+Conclusions:
+1. The Claude Code CLI emits `cache_control` on the system-prompt prefix under stream-json with **no flag** — it is on by default.
+2. It uses a **1-hour** ephemeral cache (`ephemeral_1h_input_tokens`), not the standard 5-minute window — repeated same-prefix turns stay cached for an hour.
+3. Caching is **server-side and content-keyed**, so it survives across separate processes. The per-turn fresh-process architecture already reaps it; the Phase-2 warm pool (which holds a *stable* system prompt) reaps it too. A small system prompt (< ~1024 tokens) won't create a cache entry (below the model's min cacheable size), but that's an Anthropic-side floor, not a CLI omission.
+4. **No code change made.** The lever is already pulled. The only way to *lose* it would be to vary the system-prompt prefix per turn (cache miss every time) — so keep the bare-mode system prompt stable, which the warm pool's signature matching already encourages.
+
 ---
 
 ## Rollout & verification discipline
