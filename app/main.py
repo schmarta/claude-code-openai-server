@@ -43,12 +43,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         manager = ConversationManager(mcp, settings)
         app.state.conv_manager = manager
         gc_task = asyncio.create_task(manager.gc_loop(), name="cci-gc")
+        if manager.pool is not None:
+            await manager.pool.start()
         try:
             yield
         finally:
             gc_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await gc_task
+            if manager.pool is not None:
+                await manager.pool.stop()
             await manager.close_all()
             logger.info("claude-code-interface shutting down")
 
