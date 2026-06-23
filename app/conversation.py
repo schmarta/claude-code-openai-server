@@ -37,6 +37,7 @@ from app.events import AssistantToolUse, Error, TextDelta, TurnDone
 from app.mcp_bridge import ConversationBridge, McpBridge, PendingCall
 from app.openai_models import ChatCompletionRequest, ChatMessage
 from app.translate import fold_conversation, message_text, split_system, usage_from_turn
+from app.warmpool import Signature, WarmPool, tools_signature
 
 logger = logging.getLogger("cci.conv")
 
@@ -108,6 +109,13 @@ class ConversationManager:
         self._pending_index: dict[str, str] = {}  # tool_call_id -> conv_id
         self._lock = asyncio.Lock()
         self._counter = 0
+        # Warm subprocess pool (Phase 2). None unless CCI_WARM_POOL_SIZE > 0, so
+        # it ships dark. Lifespan owns its start/stop (see app/main.lifespan).
+        self.pool: Optional[WarmPool] = (
+            WarmPool(mcp, settings, settings.warm_pool_size)
+            if settings.warm_pool_size > 0
+            else None
+        )
 
     # ── classification ───────────────────────────────────────────────────—
 
@@ -151,6 +159,32 @@ class ConversationManager:
         convo, system = split_system(req.messages)
         content = fold_conversation(convo)
 
+        # ── warm-pool fast path ───────────────────────────────────────────—
+        # On a signature match, the proc is already spawned (and warm): late-bind
+        # the request's tools onto its pre-registered bridge BEFORE the first user
+        # turn (list_tools is only consulted after the turn starts, so the schema
+        # is correct), then send the turn. No spawn, no register.
+        if self.pool is not None:
+            sig = Signature(
+                model=model, effort=effort, workdir=str(workdir), system=system,
+                tools_key=tools_signature(req.tools),
+            )
+            entry = await self.pool.acquire(sig, req.tools or [])
+            if entry is not None:
+                # Bridge already carries matching schemas (sig includes tools_key);
+                # rebind to the request's exact tool objects for good measure.
+                entry.bridge.tools = req.tools or []
+                conv = Conversation(
+                    conv_id=entry.conv_id, session=entry.session,
+                    bridge=entry.bridge, model=model,
+                )
+                async with self._lock:
+                    self._conversations[entry.conv_id] = conv
+                logger.info("conv=%s adopted from warm pool (model=%s, %d tools)",
+                            entry.conv_id, model, len(req.tools or []))
+                await entry.session.send_user_turn(content)
+                return conv
+
         async with self._lock:
             conv_id = self._next_conv_id()
         bridge = ConversationBridge(conv_id, req.tools or [])
@@ -169,6 +203,8 @@ class ConversationManager:
             effort=effort,
             mcp_config=mcp_config,
             enable_tool_search=self.settings.enable_tool_search,
+            timing_log=self.settings.timing_log,
+            timing_label="tool",
             **_prompt_kwargs(self.settings, system),
         )
         await session.start()

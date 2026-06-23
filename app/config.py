@@ -89,6 +89,17 @@ class Settings(BaseSettings):
 
     # ── Logging ────────────────────────────────────────────────────────────—
     log_level: str = "INFO"
+    # When true, emit per-turn latency metrics (spawn_ms / ttft_ms / total_ms /
+    # tok_per_s) to the "cci.timing" logger at INFO. Default off so normal
+    # operation pays nothing; scripts/bench.py sets it on the throwaway port.
+    timing_log: bool = False
+
+    # ── Warm subprocess pool ───────────────────────────────────────────────—
+    # Number of pre-spawned, idle `claude` subprocesses kept ready to adopt on a
+    # fresh tool/autonomous turn, eliminating cold-start latency. 0 disables the
+    # pool entirely (ships dark). Each pooled proc holds a pre-minted conv_id and
+    # an empty bridge whose tools are late-bound on acquire. See app/warmpool.py.
+    warm_pool_size: int = 0
 
     @field_validator("default_workdir", mode="before")
     @classmethod

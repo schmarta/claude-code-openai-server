@@ -24,10 +24,12 @@ import contextlib
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Optional, Union
 
 from app.events import ChatEvent, parse_line
+from app.timing import log_spawn
 
 logger = logging.getLogger("cci.session")
 
@@ -77,6 +79,8 @@ class ClaudeSession:
         builtin_tools: Optional[list[str]] = None,
         enable_tool_search: bool = False,
         env: Optional[dict[str, str]] = None,
+        timing_log: bool = False,
+        timing_label: str = "session",
     ) -> None:
         self.claude_bin = claude_bin
         self.model = model
@@ -96,6 +100,8 @@ class ClaudeSession:
         self.builtin_tools = builtin_tools
         self.enable_tool_search = enable_tool_search
         self._env_overrides = env or {}
+        self.timing_log = timing_log
+        self.timing_label = timing_label
 
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._queue: asyncio.Queue[Union[ChatEvent, object]] = asyncio.Queue()
@@ -111,6 +117,11 @@ class ClaudeSession:
             self.claude_bin,
             "--input-format", "stream-json",
             "--output-format", "stream-json",
+            # --verbose is MANDATORY under --output-format stream-json, NOT
+            # optional log noise. Empirically (CLI 2.1.185) dropping it makes the
+            # CLI exit 1 with "When using --print, --output-format=stream-json
+            # requires --verbose" — zero stream-json lines, no partial deltas.
+            # See Phase 1.2 in the latency plan. Do not remove.
             "--verbose",
             "--include-partial-messages",
             "--permission-prompt-tool", "stdio",
@@ -156,6 +167,7 @@ class ClaudeSession:
                     self.model, self.permission_mode, self.workdir,
                     bool(self.mcp_config))
         logger.debug("claude argv: %s", args)
+        spawn_t0 = time.monotonic()
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -170,6 +182,7 @@ class ClaudeSession:
             raise RuntimeError(
                 "claude CLI not found on PATH — install Claude Code and run `claude login`"
             ) from e
+        log_spawn(self.timing_log, self.timing_label, (time.monotonic() - spawn_t0) * 1000)
         self._reader_task = asyncio.create_task(self._read_stdout(), name="claude-stdout")
         self._stderr_task = asyncio.create_task(self._read_stderr(), name="claude-stderr")
 

@@ -31,6 +31,7 @@ from app.errors import OpenAIError, error_envelope
 from app.events import AssistantToolUse, Error, TextDelta, TurnDone
 from app.openai_models import ChatCompletionRequest
 from app.textfilter import OutputFilter
+from app.timing import TurnTimer
 from app.translate import (
     DONE,
     completion_response,
@@ -79,6 +80,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     if not content.strip():
         raise OpenAIError("no user content in messages", status_code=400, param="messages")
 
+    timing = settings.timing_log
     sess = ClaudeSession(
         claude_bin=settings.claude_bin,
         model=model,
@@ -86,6 +88,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         workdir=workdir,
         effort=effort,
         enable_tool_search=settings.enable_tool_search,
+        timing_log=timing,
+        timing_label="autonomous",
         **_prompt_kwargs(settings, system),
     )
     await sess.start()
@@ -98,21 +102,23 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     flatten = settings.flatten_markdown_tables
     if req.stream:
         return StreamingResponse(
-            _stream(sess, cid, model, created, timeout, flatten),
+            _stream(sess, cid, model, created, timeout, flatten, timing),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
         )
-    body = await _collect(sess, cid, model, created, timeout, flatten)
+    body = await _collect(sess, cid, model, created, timeout, flatten, timing)
     return JSONResponse(content=body)
 
 
 async def _stream(
     sess: ClaudeSession, cid: str, model: str, created: int, timeout: float,
-    flatten_tables: bool = True,
+    flatten_tables: bool = True, timing: bool = False,
 ) -> AsyncIterator[str]:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     joiner = OutputFilter(flatten_tables=flatten_tables)
+    timer = TurnTimer(timing, "autonomous")
+    completion_tokens = 0
     try:
         yield sse(role_chunk(cid, model, created))
         while True:
@@ -133,16 +139,19 @@ async def _stream(
             if isinstance(ev, TextDelta):
                 out = joiner.feed(ev.text)
                 if out:
+                    timer.first_token()
                     yield sse(text_chunk(cid, model, created, out))
             elif isinstance(ev, TurnDone):
                 tail = joiner.flush()
                 if tail:
                     yield sse(text_chunk(cid, model, created, tail))
+                usage = usage_from_turn(ev)
+                completion_tokens = usage.get("completion_tokens", 0)
                 yield sse(
                     finish_chunk(
                         cid, model, created,
                         map_finish_reason(ev.stop_reason),
-                        usage_from_turn(ev),
+                        usage,
                     )
                 )
                 break
@@ -159,16 +168,19 @@ async def _stream(
             # Init / others: ignore.
         yield DONE
     finally:
+        timer.done(completion_tokens)
         await sess.aclose()
 
 
 async def _collect(
     sess: ClaudeSession, cid: str, model: str, created: int, timeout: float,
-    flatten_tables: bool = True,
+    flatten_tables: bool = True, timing: bool = False,
 ) -> dict:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     joiner = OutputFilter(flatten_tables=flatten_tables)
+    timer = TurnTimer(timing, "autonomous")
+    completion_tokens = 0
     chunks: list[str] = []
     try:
         while True:
@@ -184,6 +196,7 @@ async def _collect(
                     cid, model, created, content="".join(chunks), finish_reason="stop"
                 )
             if isinstance(ev, TextDelta):
+                timer.first_token()
                 chunks.append(joiner.feed(ev.text))
             elif isinstance(ev, TurnDone):
                 chunks.append(joiner.flush())
@@ -192,11 +205,13 @@ async def _collect(
                 # only when no deltas were captured.
                 assembled = "".join(chunks)
                 text = assembled if assembled.strip() else (ev.result_text or "")
+                usage = usage_from_turn(ev)
+                completion_tokens = usage.get("completion_tokens", 0)
                 return completion_response(
                     cid, model, created,
                     content=text,
                     finish_reason=map_finish_reason(ev.stop_reason),
-                    usage=usage_from_turn(ev),
+                    usage=usage,
                 )
             elif isinstance(ev, Error):
                 raise OpenAIError(ev.message, status_code=502, type="upstream_error")
@@ -205,6 +220,7 @@ async def _collect(
                 joiner.tool_boundary()
                 continue
     finally:
+        timer.done(completion_tokens)
         await sess.aclose()
 
 
@@ -231,76 +247,95 @@ async def _handle_tools(
 
     cid = new_completion_id()
     created = now()
-    flatten = get_settings().flatten_markdown_tables
+    settings = get_settings()
+    flatten = settings.flatten_markdown_tables
+    timing = settings.timing_log
 
     if req.stream:
         return StreamingResponse(
-            _tool_stream(mgr, conv, cid, model, created, flatten),
+            _tool_stream(mgr, conv, cid, model, created, flatten, timing),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
         )
-    body = await _tool_collect(mgr, conv, cid, model, created, flatten)
+    body = await _tool_collect(mgr, conv, cid, model, created, flatten, timing)
     return JSONResponse(content=body)
 
 
-async def _tool_stream(mgr, conv, cid, model, created, flatten_tables: bool = True):
+async def _tool_stream(mgr, conv, cid, model, created, flatten_tables: bool = True,
+                       timing: bool = False):
     # Same OutputFilter the autonomous path uses, so the newline-seam and table
     # flattening apply on the tool path too.
     filt = OutputFilter(flatten_tables=flatten_tables)
-    yield sse(role_chunk(cid, model, created))
-    async for ch in mgr.run_turn(conv):
-        if isinstance(ch, TextChunk):
-            out = filt.feed(ch.text)
-            if out:
-                yield sse(text_chunk(cid, model, created, out))
-        elif isinstance(ch, ToolBoundaryChunk):
-            filt.tool_boundary()
-        elif isinstance(ch, ToolCallsChunk):
-            tail = filt.flush()
-            if tail:
-                yield sse(text_chunk(cid, model, created, tail))
-            calls = [
-                {**pc.openai_tool_call(), "index": i} for i, pc in enumerate(ch.calls)
-            ]
-            yield sse(tool_calls_chunk(cid, model, created, calls))
-            yield sse(finish_chunk(cid, model, created, "tool_calls"))
-            break
-        elif isinstance(ch, DoneChunk):
-            tail = filt.flush()
-            if tail:
-                yield sse(text_chunk(cid, model, created, tail))
-            yield sse(finish_chunk(cid, model, created, ch.finish_reason, ch.usage or None))
-            break
-        elif isinstance(ch, ErrorChunk):
-            yield sse(error_envelope(ch.message, type="upstream_error"))
-            break
-    yield DONE
+    timer = TurnTimer(timing, "tool")
+    completion_tokens = 0
+    try:
+        yield sse(role_chunk(cid, model, created))
+        async for ch in mgr.run_turn(conv):
+            if isinstance(ch, TextChunk):
+                out = filt.feed(ch.text)
+                if out:
+                    timer.first_token()
+                    yield sse(text_chunk(cid, model, created, out))
+            elif isinstance(ch, ToolBoundaryChunk):
+                filt.tool_boundary()
+            elif isinstance(ch, ToolCallsChunk):
+                tail = filt.flush()
+                if tail:
+                    yield sse(text_chunk(cid, model, created, tail))
+                calls = [
+                    {**pc.openai_tool_call(), "index": i} for i, pc in enumerate(ch.calls)
+                ]
+                yield sse(tool_calls_chunk(cid, model, created, calls))
+                yield sse(finish_chunk(cid, model, created, "tool_calls"))
+                break
+            elif isinstance(ch, DoneChunk):
+                tail = filt.flush()
+                if tail:
+                    yield sse(text_chunk(cid, model, created, tail))
+                completion_tokens = (ch.usage or {}).get("completion_tokens", 0)
+                yield sse(finish_chunk(cid, model, created, ch.finish_reason, ch.usage or None))
+                break
+            elif isinstance(ch, ErrorChunk):
+                yield sse(error_envelope(ch.message, type="upstream_error"))
+                break
+        yield DONE
+    finally:
+        timer.done(completion_tokens)
 
 
-async def _tool_collect(mgr, conv, cid, model, created, flatten_tables: bool = True) -> dict:
+async def _tool_collect(mgr, conv, cid, model, created, flatten_tables: bool = True,
+                        timing: bool = False) -> dict:
     filt = OutputFilter(flatten_tables=flatten_tables)
+    timer = TurnTimer(timing, "tool")
+    completion_tokens = 0
     text_parts: list[str] = []
-    async for ch in mgr.run_turn(conv):
-        if isinstance(ch, TextChunk):
-            text_parts.append(filt.feed(ch.text))
-        elif isinstance(ch, ToolBoundaryChunk):
-            filt.tool_boundary()
-        elif isinstance(ch, ToolCallsChunk):
-            text_parts.append(filt.flush())
-            return completion_response(
-                cid, model, created,
-                content="".join(text_parts) or None,
-                finish_reason="tool_calls",
-                tool_calls=[pc.openai_tool_call() for pc in ch.calls],
-            )
-        elif isinstance(ch, DoneChunk):
-            text_parts.append(filt.flush())
-            return completion_response(
-                cid, model, created,
-                content="".join(text_parts),
-                finish_reason=ch.finish_reason,
-                usage=ch.usage or None,
-            )
-        elif isinstance(ch, ErrorChunk):
-            raise OpenAIError(ch.message, status_code=ch.status_code, type="upstream_error")
-    raise OpenAIError("no response produced", status_code=502, type="upstream_error")
+    try:
+        async for ch in mgr.run_turn(conv):
+            if isinstance(ch, TextChunk):
+                if ch.text:
+                    timer.first_token()
+                text_parts.append(filt.feed(ch.text))
+            elif isinstance(ch, ToolBoundaryChunk):
+                filt.tool_boundary()
+            elif isinstance(ch, ToolCallsChunk):
+                text_parts.append(filt.flush())
+                return completion_response(
+                    cid, model, created,
+                    content="".join(text_parts) or None,
+                    finish_reason="tool_calls",
+                    tool_calls=[pc.openai_tool_call() for pc in ch.calls],
+                )
+            elif isinstance(ch, DoneChunk):
+                text_parts.append(filt.flush())
+                completion_tokens = (ch.usage or {}).get("completion_tokens", 0)
+                return completion_response(
+                    cid, model, created,
+                    content="".join(text_parts),
+                    finish_reason=ch.finish_reason,
+                    usage=ch.usage or None,
+                )
+            elif isinstance(ch, ErrorChunk):
+                raise OpenAIError(ch.message, status_code=ch.status_code, type="upstream_error")
+        raise OpenAIError("no response produced", status_code=502, type="upstream_error")
+    finally:
+        timer.done(completion_tokens)

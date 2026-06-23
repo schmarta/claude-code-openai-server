@@ -43,12 +43,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         manager = ConversationManager(mcp, settings)
         app.state.conv_manager = manager
         gc_task = asyncio.create_task(manager.gc_loop(), name="cci-gc")
+        if manager.pool is not None:
+            await manager.pool.start()
         try:
             yield
         finally:
             gc_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await gc_task
+            if manager.pool is not None:
+                await manager.pool.stop()
             await manager.close_all()
             logger.info("claude-code-interface shutting down")
 
@@ -109,7 +113,15 @@ app = create_app()
 
 
 def run() -> None:
-    """Console-script entrypoint (``claude-code-interface``)."""
+    """Console-script entrypoint (``claude-code-interface``).
+
+    Requests uvloop + httptools explicitly. uvicorn's default ``loop="auto"``
+    already picks uvloop when installed, but naming them makes the fast path
+    deterministic regardless of what is importable at boot. NOTE: the systemd
+    unit launches ``python -m uvicorn`` directly (not this entrypoint), so to
+    pin the fast loop in production either switch ExecStart to the
+    ``claude-code-interface`` script or add ``--loop uvloop --http httptools``.
+    """
     import uvicorn
 
     settings = get_settings()
@@ -118,6 +130,8 @@ def run() -> None:
         host=settings.host,
         port=settings.port,
         log_level=settings.log_level.lower(),
+        loop="uvloop",
+        http="httptools",
     )
 
 

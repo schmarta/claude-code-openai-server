@@ -10,6 +10,11 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    # uvloop + httptools come in via uvicorn[standard], but are pinned
+    # explicitly so the fast event loop / HTTP parser are guaranteed present
+    # and run() can request them by name (see app/main.run).
+    "uvloop>=0.19; sys_platform != 'win32'",
+    "httptools>=0.6",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "mcp>=1.2",
