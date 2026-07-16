@@ -47,6 +47,28 @@ def test_fold_single_user():
     assert fold_conversation(convo) == "what is 2+2?"
 
 
+def test_fold_single_user_preserves_data_image():
+    data = "iVBORw0KGgo="
+    convo = [ChatMessage(role="user", content=[
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{data}"}},
+    ])]
+    assert fold_conversation(convo) == [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image", "source": {
+            "type": "base64", "media_type": "image/png", "data": data,
+        }},
+    ]
+
+
+def test_fold_rejects_invalid_data_image():
+    convo = [ChatMessage(role="user", content=[
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,not-valid!"}},
+    ])]
+    assert fold_conversation(convo) == "what is this?"
+
+
 def test_fold_multiturn_transcript():
     convo = [
         ChatMessage(role="user", content="hi"),

@@ -12,6 +12,7 @@ Two directions:
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 import uuid
@@ -55,6 +56,51 @@ def message_text(msg: ChatMessage) -> str:
     return "".join(parts)
 
 
+_IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+_MAX_IMAGE_BASE64_BYTES = 20 * 1024 * 1024
+
+
+def _claude_message_content(msg: ChatMessage) -> str | list[dict[str, Any]]:
+    """Preserve OpenAI data-URL images as Claude stream-json image blocks."""
+    if not isinstance(msg.content, list):
+        return message_text(msg)
+
+    blocks: list[dict[str, Any]] = []
+    has_image = False
+    for part in msg.content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text" and isinstance(part.get("text"), str):
+            blocks.append({"type": "text", "text": part["text"]})
+            continue
+        if part.get("type") != "image_url":
+            continue
+
+        image_url = part.get("image_url")
+        url = image_url.get("url", "") if isinstance(image_url, dict) else ""
+        header, sep, data = str(url).partition(",")
+        media_type = header[5:].split(";", 1)[0].lower() if header.startswith("data:") else ""
+        if (
+            not sep
+            or ";base64" not in header.lower()
+            or media_type not in _IMAGE_MEDIA_TYPES
+            or not data
+            or len(data) > _MAX_IMAGE_BASE64_BYTES
+        ):
+            continue
+        try:
+            base64.b64decode(data, validate=True)
+        except ValueError:
+            continue
+        blocks.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": data},
+        })
+        has_image = True
+
+    return blocks if has_image else message_text(msg)
+
+
 def split_system(messages: list[ChatMessage]) -> tuple[list[ChatMessage], Optional[str]]:
     """Partition into (non-system messages, joined system prompt or None)."""
     system_parts: list[str] = []
@@ -74,7 +120,7 @@ def _role_label(role: str) -> str:
     return {"user": "User", "assistant": "Assistant", "tool": "Tool"}.get(role, role.capitalize())
 
 
-def fold_conversation(convo: list[ChatMessage]) -> str:
+def fold_conversation(convo: list[ChatMessage]) -> str | list[dict[str, Any]]:
     """Fold a (system-stripped) OpenAI conversation into one Claude user turn.
 
     A lone trailing user message is sent as-is. Otherwise prior turns become a
@@ -83,7 +129,7 @@ def fold_conversation(convo: list[ChatMessage]) -> str:
     if not convo:
         return ""
     if len(convo) == 1 and convo[0].role == "user":
-        return message_text(convo[0])
+        return _claude_message_content(convo[0])
 
     lines: list[str] = []
     for m in convo[:-1]:
@@ -96,7 +142,15 @@ def fold_conversation(convo: list[ChatMessage]) -> str:
         if text:
             lines.append(f"{_role_label(m.role)}: {text}")
     last = convo[-1]
-    last_line = f"{_role_label(last.role)}: {message_text(last)}"
+    last_content = _claude_message_content(last)
+    if isinstance(last_content, list):
+        if lines:
+            return [{
+                "type": "text",
+                "text": "Conversation so far:\n" + "\n".join(lines) + f"\n\n{_role_label(last.role)}:",
+            }, *last_content]
+        return last_content
+    last_line = f"{_role_label(last.role)}: {last_content}"
     if lines:
         return (
             "Conversation so far:\n"

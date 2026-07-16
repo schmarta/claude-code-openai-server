@@ -77,7 +77,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     # ── autonomous path (no external tools) ────────────────────────────────
     convo, system = split_system(req.messages)
     content = fold_conversation(convo)
-    if not content.strip():
+    if not content or (isinstance(content, str) and not content.strip()):
         raise OpenAIError("no user content in messages", status_code=400, param="messages")
 
     timing = settings.timing_log
@@ -241,7 +241,8 @@ async def _handle_tools(
             )
     else:
         convo, _ = split_system(req.messages)
-        if not fold_conversation(convo).strip():
+        content = fold_conversation(convo)
+        if not content or (isinstance(content, str) and not content.strip()):
             raise OpenAIError("no user content in messages", status_code=400, param="messages")
         conv = await mgr.create(req, model=model, workdir=workdir, effort=effort)
 
