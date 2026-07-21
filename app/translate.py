@@ -120,11 +120,26 @@ def _role_label(role: str) -> str:
     return {"user": "User", "assistant": "Assistant", "tool": "Tool"}.get(role, role.capitalize())
 
 
+# History is handed to a stateless subprocess as context, then the latest user
+# message as the live turn. The preamble deliberately does NOT end on a role cue
+# ("User:"/"Assistant:") and instructs the model not to continue the transcript:
+# a bare model reading a role-tagged log will otherwise text-complete it and
+# fabricate the next "User:" turn instead of stopping after its own reply.
+_HISTORY_HEADER = "Conversation history so far (context only):"
+_LIVE_GUARD = (
+    'Reply only to the latest message below, as the assistant. Write a single '
+    'reply and then stop — do not continue the transcript or emit any "User:" '
+    'or "Assistant:" lines of your own.'
+)
+
+
 def fold_conversation(convo: list[ChatMessage]) -> str | list[dict[str, Any]]:
     """Fold a (system-stripped) OpenAI conversation into one Claude user turn.
 
     A lone trailing user message is sent as-is. Otherwise prior turns become a
-    transcript preamble so a fresh, stateless subprocess still has the context.
+    labelled context preamble — followed by an explicit guard and the latest
+    message as the raw live turn — so a fresh, stateless subprocess has the
+    context without reading it as a transcript to continue.
     """
     if not convo:
         return ""
@@ -141,24 +156,18 @@ def fold_conversation(convo: list[ChatMessage]) -> str | list[dict[str, Any]]:
             text = (text + " " if text else "") + f"[called tools: {calls}]"
         if text:
             lines.append(f"{_role_label(m.role)}: {text}")
+
     last = convo[-1]
     last_content = _claude_message_content(last)
+
+    # No usable prior context: send the latest message alone (nothing to fold).
+    if not lines:
+        return last_content if isinstance(last_content, list) else message_text(last)
+
+    preamble = _HISTORY_HEADER + "\n" + "\n".join(lines) + "\n\n" + _LIVE_GUARD + "\n\n"
     if isinstance(last_content, list):
-        if lines:
-            return [{
-                "type": "text",
-                "text": "Conversation so far:\n" + "\n".join(lines) + f"\n\n{_role_label(last.role)}:",
-            }, *last_content]
-        return last_content
-    last_line = f"{_role_label(last.role)}: {last_content}"
-    if lines:
-        return (
-            "Conversation so far:\n"
-            + "\n".join(lines)
-            + "\n\n"
-            + last_line
-        )
-    return message_text(last)
+        return [{"type": "text", "text": preamble}, *last_content]
+    return preamble + message_text(last)
 
 
 # ── stop_reason / usage mapping ────────────────────────────────────────────—
