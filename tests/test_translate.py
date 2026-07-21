@@ -6,6 +6,8 @@ from app.events import TurnDone
 from app.openai_models import ChatMessage, FunctionCall, ToolCall
 from app.translate import (
     DONE,
+    _CONTINUE_GUARD,
+    _LIVE_GUARD,
     completion_response,
     finish_chunk,
     fold_conversation,
@@ -76,10 +78,45 @@ def test_fold_multiturn_transcript():
         ChatMessage(role="user", content="bye"),
     ]
     folded = fold_conversation(convo)
-    assert folded.startswith("Conversation so far:")
+    # Prior turns are carried as labelled context...
     assert "User: hi" in folded
     assert "Assistant: hello" in folded
-    assert folded.rstrip().endswith("User: bye")
+    # ...but the folded content must NOT read as a continuable transcript. The
+    # latest user message is the raw tail — no "User:" prefix, no dangling role
+    # cue for the model to keep filling in (which made it fabricate a next
+    # "User:" turn instead of stopping).
+    assert folded.rstrip().endswith("bye")
+    assert not folded.rstrip().endswith("User: bye")
+    assert not folded.rstrip().endswith(":")
+    # An explicit guard against continuing the transcript is present.
+    assert _LIVE_GUARD in folded
+
+
+def test_fold_multiturn_does_not_end_on_role_cue():
+    """Regression: a dangling 'User:'/'Assistant:' cue at the tail invites the
+    bare model to text-complete the transcript and emit a fabricated user turn."""
+    convo = [
+        ChatMessage(role="user", content="what is the capital of France?"),
+        ChatMessage(role="assistant", content="Paris."),
+        ChatMessage(role="user", content="and Germany?"),
+    ]
+    tail = fold_conversation(convo).rstrip().splitlines()[-1]
+    assert tail == "and Germany?"
+
+
+def test_fold_assistant_tail_folds_into_context():
+    """A conversation ending on an assistant turn (prefill / continue pattern)
+    must not present the assistant's own text as the live message to reply to:
+    it is labelled into the context and a continue-style guard closes the fold."""
+    convo = [
+        ChatMessage(role="user", content="write a haiku"),
+        ChatMessage(role="assistant", content="Autumn wind rises"),
+    ]
+    folded = fold_conversation(convo)
+    assert "User: write a haiku" in folded
+    assert "Assistant: Autumn wind rises" in folded
+    assert folded.rstrip().endswith(_CONTINUE_GUARD)
+    assert not folded.rstrip().endswith(":")
 
 
 def test_fold_includes_assistant_tool_calls():
