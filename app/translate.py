@@ -131,6 +131,15 @@ _LIVE_GUARD = (
     'reply and then stop — do not continue the transcript or emit any "User:" '
     'or "Assistant:" lines of your own.'
 )
+# When the conversation ends on a non-user turn (assistant prefill / a stray
+# tool tail), there is no live user message to append raw: the whole
+# conversation is context and the model picks up from where it leaves off.
+_CONTINUE_GUARD = (
+    'Continue as the assistant from where the conversation above leaves off — '
+    'complete the final assistant turn if it is partial, or reply to the last '
+    'message otherwise. Write that single reply and then stop; do not continue '
+    'the transcript further or emit any "User:" or "Assistant:" lines of your own.'
+)
 
 
 def fold_conversation(convo: list[ChatMessage]) -> str | list[dict[str, Any]]:
@@ -139,15 +148,22 @@ def fold_conversation(convo: list[ChatMessage]) -> str | list[dict[str, Any]]:
     A lone trailing user message is sent as-is. Otherwise prior turns become a
     labelled context preamble — followed by an explicit guard and the latest
     message as the raw live turn — so a fresh, stateless subprocess has the
-    context without reading it as a transcript to continue.
+    context without reading it as a transcript to continue. A conversation
+    ending on a non-user turn is folded entirely into the preamble with a
+    continue-style guard instead.
     """
     if not convo:
         return ""
     if len(convo) == 1 and convo[0].role == "user":
         return _claude_message_content(convo[0])
 
+    last = convo[-1]
+    # A non-user tail has no live turn to append raw; label it into the
+    # context like every other prior turn.
+    history = convo[:-1] if last.role == "user" else convo
+
     lines: list[str] = []
-    for m in convo[:-1]:
+    for m in history:
         text = message_text(m)
         if m.tool_calls:
             calls = ", ".join(
@@ -157,7 +173,11 @@ def fold_conversation(convo: list[ChatMessage]) -> str | list[dict[str, Any]]:
         if text:
             lines.append(f"{_role_label(m.role)}: {text}")
 
-    last = convo[-1]
+    if last.role != "user":
+        if not lines:
+            return message_text(last)
+        return _HISTORY_HEADER + "\n" + "\n".join(lines) + "\n\n" + _CONTINUE_GUARD
+
     last_content = _claude_message_content(last)
 
     # No usable prior context: send the latest message alone (nothing to fold).

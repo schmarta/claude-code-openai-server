@@ -6,6 +6,8 @@ from app.events import TurnDone
 from app.openai_models import ChatMessage, FunctionCall, ToolCall
 from app.translate import (
     DONE,
+    _CONTINUE_GUARD,
+    _LIVE_GUARD,
     completion_response,
     finish_chunk,
     fold_conversation,
@@ -87,7 +89,7 @@ def test_fold_multiturn_transcript():
     assert not folded.rstrip().endswith("User: bye")
     assert not folded.rstrip().endswith(":")
     # An explicit guard against continuing the transcript is present.
-    assert '"User:"' in folded
+    assert _LIVE_GUARD in folded
 
 
 def test_fold_multiturn_does_not_end_on_role_cue():
@@ -100,6 +102,21 @@ def test_fold_multiturn_does_not_end_on_role_cue():
     ]
     tail = fold_conversation(convo).rstrip().splitlines()[-1]
     assert tail == "and Germany?"
+
+
+def test_fold_assistant_tail_folds_into_context():
+    """A conversation ending on an assistant turn (prefill / continue pattern)
+    must not present the assistant's own text as the live message to reply to:
+    it is labelled into the context and a continue-style guard closes the fold."""
+    convo = [
+        ChatMessage(role="user", content="write a haiku"),
+        ChatMessage(role="assistant", content="Autumn wind rises"),
+    ]
+    folded = fold_conversation(convo)
+    assert "User: write a haiku" in folded
+    assert "Assistant: Autumn wind rises" in folded
+    assert folded.rstrip().endswith(_CONTINUE_GUARD)
+    assert not folded.rstrip().endswith(":")
 
 
 def test_fold_includes_assistant_tool_calls():
