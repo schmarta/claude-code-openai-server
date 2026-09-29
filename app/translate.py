@@ -273,28 +273,29 @@ def usage_from_turn(turn: TurnDone) -> dict[str, Any]:
     """
     u = turn.usage or {}
     iterations = u.get("iterations")
-    if isinstance(iterations, list) and iterations:
-        prompt = 0
-        completion = 0
-        for it in iterations:
-            if not isinstance(it, dict):
-                continue
-            prompt += _int(it.get("input_tokens"))
-            prompt += _int(it.get("cache_read_input_tokens"))
-            prompt += _int(it.get("cache_creation_input_tokens"))
-            completion += _int(it.get("output_tokens"))
-    else:
-        prompt = (
-            _int(u.get("input_tokens"))
-            + _int(u.get("cache_read_input_tokens"))
-            + _int(u.get("cache_creation_input_tokens"))
-        )
-        completion = _int(u.get("output_tokens"))
+    parts = (
+        [it for it in iterations if isinstance(it, dict)]
+        if isinstance(iterations, list) and iterations
+        else [u]
+    )
+    fresh = sum(_int(p.get("input_tokens")) for p in parts)
+    cached = sum(_int(p.get("cache_read_input_tokens")) for p in parts)
+    written = sum(_int(p.get("cache_creation_input_tokens")) for p in parts)
+    completion = sum(_int(p.get("output_tokens")) for p in parts)
+    prompt = fresh + cached + written
     usage: dict[str, Any] = {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": prompt + completion,
     }
+    # OpenAI reports cache hits as prompt_tokens_details.cached_tokens (a subset
+    # of prompt_tokens); cache_write_tokens is the OpenRouter/OpenAI extension
+    # for cache creation. Without these, clients see a 0% cache hit rate.
+    if cached or written:
+        usage["prompt_tokens_details"] = {
+            "cached_tokens": cached,
+            "cache_write_tokens": written,
+        }
     if turn.total_cost_usd is not None:
         usage["cost_usd"] = turn.total_cost_usd
     return usage

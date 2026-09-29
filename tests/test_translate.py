@@ -301,6 +301,9 @@ def test_usage_from_turn_toplevel():
     assert u["completion_tokens"] == 6
     assert u["total_tokens"] == 119
     assert u["cost_usd"] == 0.05
+    d = u["prompt_tokens_details"]
+    assert d == {"cached_tokens": 100, "cache_write_tokens": 10}
+    assert d["cached_tokens"] + d["cache_write_tokens"] <= u["prompt_tokens"]
 
 
 def test_usage_from_turn_iterations_sum():
@@ -319,6 +322,7 @@ def test_usage_from_turn_iterations_sum():
     assert u["prompt_tokens"] == 8
     assert u["completion_tokens"] == 10
     assert "cost_usd" not in u
+    assert u["prompt_tokens_details"] == {"cached_tokens": 1, "cache_write_tokens": 0}
 
 
 def test_usage_from_turn_empty():
